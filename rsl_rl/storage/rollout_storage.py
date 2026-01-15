@@ -238,14 +238,12 @@ class RolloutStorage:
                     old_actions_log_prob_batch,
                     old_mu_batch,
                     old_sigma_batch,
-                    privileged_actions_mean_batch,
-                    privileged_actions_std_batch,
                     (
                         hidden_state_a_batch,
                         hidden_state_c_batch,
                     ),
                     masks_batch,
-                ) + (privileged_actions_mean_batch, privileged_actions_std_batch) if self.training_type == "bc_rl" else ()
+                ) + ((privileged_actions_mean_batch, privileged_actions_std_batch) if self.training_type == "bc_rl" else ())
 
     # For reinforcement learning with recurrent networks
     def recurrent_mini_batch_generator(self, num_mini_batches: int, num_epochs: int = 8) -> Generator:
@@ -321,6 +319,6 @@ class RolloutStorage:
                         hidden_state_c_batch,
                     ),
                     masks_batch,
-                ) + (privileged_actions_mean_batch, privileged_actions_std_batch) if self.training_type == "bc_rl" else ()
+                ) + ((privileged_actions_mean_batch, privileged_actions_std_batch) if self.training_type == "bc_rl" else ())
 
                 first_traj = last_traj
