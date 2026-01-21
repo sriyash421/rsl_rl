@@ -78,6 +78,9 @@ class BCPPO(PPO):
         self.bc_loss_coeff = self.bc["cloning_loss_coeff"]
         self.bc_decay = self.bc["loss_decay"]
         self.learn_std = self.bc["learn_std"]
+        
+        # self.advisor_alpha = 4.0
+        self.advisor_loss = behavior_cloning_cfg["advisor_loss"]
 
     def init_storage(
         self,
@@ -130,6 +133,16 @@ class BCPPO(PPO):
             mean_bc_loss = 0
         else:
             mean_bc_loss = None
+        
+        if self.advisor_loss:
+            mean_advisor_weight = 0
+            mean_auxillary_loss = 0
+            mean_advisor_loss = 0
+        else:
+            mean_advisor_weight = None
+            mean_auxillary_loss = None
+            mean_il_loss = None
+            mean_advisor_loss = None
 
         # generator for mini batches
         if self.policy.is_recurrent:
@@ -191,7 +204,7 @@ class BCPPO(PPO):
             surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(
                 ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
             )
-            surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+            surrogate_loss = torch.max(surrogate, surrogate_clipped)
 
             # Value function loss
             if self.use_clipped_value_loss:
@@ -203,17 +216,58 @@ class BCPPO(PPO):
                 value_loss = torch.max(value_losses, value_losses_clipped).mean()
             else:
                 value_loss = (returns_batch - value_batch).pow(2).mean()
-
-            loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
-
-            mse_loss = torch.nn.MSELoss()
-            mean_loss = mse_loss(mu_batch, expert_action_mu_batch)
-            bc_loss = mean_loss
-            if self.learn_std:
-                std_loss = mse_loss(sigma_batch, expert_action_sigma_batch)
-                bc_loss += std_loss
-            self.bc_loss_coeff *= self.bc_decay
-            loss = (1 - self.bc_loss_coeff) * loss + self.bc_loss_coeff * bc_loss
+            
+            
+            # imitation loss
+            if self.advisor_loss:
+                pg_loss = surrogate_loss - self.entropy_coef * entropy_batch
+                
+                # CE loss
+                self.policy.auxillary_act(obs_batch, masks=masks_batch, hidden_state=hidden_states_batch[0])
+                aux_actions_log_prob_batch = self.policy.get_auxillary_actions_log_prob(expert_action_mu_batch)                
+                # get kl-div between: (expert_action_mu_batch, expert_action_sigma_batch)
+                aux_mu_batch = self.policy.auxillary_action_mean
+                aux_sigma_batch = self.policy.auxillary_action_std
+                auxillary_loss = -0.01 * aux_actions_log_prob_batch.mean()
+                
+                eps = 1e-8
+                kl_div = (
+                    torch.log((aux_sigma_batch + eps) / (expert_action_sigma_batch + eps))
+                    + (expert_action_sigma_batch.pow(2) + (expert_action_mu_batch - aux_mu_batch).pow(2))
+                    / (2.0 * (aux_sigma_batch + eps).pow(2))
+                    - 0.5
+                ).sum(dim=-1)   # (B,)
+                advisor_weight = torch.exp(-0.001 * kl_div).detach()
+                
+                # mse_loss = torch.nn.MSELoss(reduction="none")
+                mean_loss = ((mu_batch - expert_action_mu_batch)**2).mean(-1)
+                bc_loss = mean_loss
+                if self.learn_std:
+                    std_loss = ((sigma_batch - expert_action_sigma_batch)**2).mean(-1)
+                    bc_loss += std_loss
+                
+                advisor_loss = (1 - advisor_weight) * pg_loss + advisor_weight * 0.01 * bc_loss
+                loss = advisor_loss.mean() + auxillary_loss
+                
+                mean_advisor_weight += advisor_weight.mean().item()
+                mean_advisor_loss += advisor_loss.mean().item()
+                mean_auxillary_loss += auxillary_loss.item()
+                bc_loss_stat = bc_loss.mean().item()
+            else:
+                pg_loss = surrogate_loss.mean() - self.entropy_coef * entropy_batch.mean()
+                
+                mse_loss = torch.nn.MSELoss()
+                mean_loss = mse_loss(mu_batch, expert_action_mu_batch)
+                bc_loss = mean_loss
+                if self.learn_std:
+                    std_loss = mse_loss(sigma_batch, expert_action_sigma_batch)
+                    bc_loss += std_loss
+                self.bc_loss_coeff *= self.bc_decay
+                loss = (1 - self.bc_loss_coeff) * pg_loss + self.bc_loss_coeff * bc_loss
+                bc_loss_stat = bc_loss.item()
+            
+            # value loss
+            loss += self.value_loss_coef * value_loss
 
             # Gradient step
             # -- For PPO
@@ -224,11 +278,11 @@ class BCPPO(PPO):
 
             # Store the losses
             mean_value_loss += value_loss.item()
-            mean_surrogate_loss += surrogate_loss.item()
+            mean_surrogate_loss += surrogate_loss.mean().item()
             mean_entropy += entropy_batch.mean().item()
             # -- BC loss
             if mean_bc_loss is not None:
-                mean_bc_loss += bc_loss.item()
+                mean_bc_loss += bc_loss_stat
 
         # -- For PPO
         num_updates = self.num_learning_epochs * self.num_mini_batches
@@ -237,6 +291,17 @@ class BCPPO(PPO):
         # -- For BC
         if mean_bc_loss is not None:
             mean_bc_loss /= num_updates        # -- Clear the storage
+        else:
+            mean_bc_loss = 0.0
+        
+        if mean_advisor_loss is not None:
+            mean_advisor_weight /= num_updates
+            mean_advisor_loss /= num_updates
+            mean_auxillary_loss /= num_updates
+        else:
+            mean_advisor_weight = 0.0
+            mean_advisor_loss = 0.0
+            mean_auxillary_loss = 0.0
         
         self.storage.clear()
 
@@ -247,5 +312,8 @@ class BCPPO(PPO):
             "entropy": mean_entropy,
             "bc_loss": mean_bc_loss,
             "bc_loss_coeff": self.bc_loss_coeff,
+            "advisor_loss": mean_advisor_loss,
+            "auxillary_loss": mean_auxillary_loss,
+            "advisor_weight": mean_advisor_weight
         }
         return loss_dict

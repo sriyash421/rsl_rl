@@ -67,8 +67,10 @@ class ActorCriticRecurrent(nn.Module):
         self.memory_a = Memory(num_actor_obs, rnn_hidden_dim, rnn_num_layers, rnn_type)
         if self.state_dependent_std:
             self.actor = MLP(rnn_hidden_dim, [2, num_actions], actor_hidden_dims, activation)
+            self.auxillary_actor = MLP(rnn_hidden_dim, [2, num_actions], actor_hidden_dims, activation)
         else:
             self.actor = MLP(rnn_hidden_dim, num_actions, actor_hidden_dims, activation)
+            self.auxillary_actor = MLP(rnn_hidden_dim, num_actions, actor_hidden_dims, activation)
         print(f"Actor RNN: {self.memory_a}")
         print(f"Actor MLP: {self.actor}")
 
@@ -98,17 +100,23 @@ class ActorCriticRecurrent(nn.Module):
             torch.nn.init.zeros_(self.actor[-2].weight[num_actions:])
             if self.noise_std_type == "scalar":
                 torch.nn.init.constant_(self.actor[-2].bias[num_actions:], init_noise_std)
+                torch.nn.init.constant_(self.auxillary_actor[-2].bias[num_actions:], init_noise_std)
             elif self.noise_std_type == "log":
                 torch.nn.init.constant_(
                     self.actor[-2].bias[num_actions:], torch.log(torch.tensor(init_noise_std + 1e-7))
+                )
+                torch.nn.init.constant_(
+                    self.auxillary_actor[-2].bias[num_actions:], torch.log(torch.tensor(init_noise_std + 1e-7))
                 )
             else:
                 raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
         else:
             if self.noise_std_type == "scalar":
                 self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
+                self.auxillary_std = nn.Parameter(init_noise_std * torch.ones(num_actions))
             elif self.noise_std_type == "log":
                 self.log_std = nn.Parameter(torch.log(init_noise_std * torch.ones(num_actions)))
+                self.auxillary_log_std = nn.Parameter(torch.log(init_noise_std * torch.ones(num_actions)))
             else:
                 raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
 
@@ -126,6 +134,15 @@ class ActorCriticRecurrent(nn.Module):
     @property
     def action_std(self) -> torch.Tensor:
         return self.distribution.stddev
+    
+    @property
+    def auxillary_action_mean(self) -> torch.Tensor:
+        return self.auxillary_distribution.mean
+
+    @property
+    def auxillary_action_std(self) -> torch.Tensor:
+        return self.auxillary_distribution.stddev
+
 
     @property
     def entropy(self) -> torch.Tensor:
@@ -161,6 +178,30 @@ class ActorCriticRecurrent(nn.Module):
                 raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
         # Create distribution
         self.distribution = Normal(mean, std)
+    
+    def _update_auxillary_distribution(self, obs: TensorDict) -> None:
+        if self.state_dependent_std:
+            # Compute mean and standard deviation
+            mean_and_std = self.auxillary_actor(obs)
+            if self.noise_std_type == "scalar":
+                mean, std = torch.unbind(mean_and_std, dim=-2)
+            elif self.noise_std_type == "log":
+                mean, log_std = torch.unbind(mean_and_std, dim=-2)
+                std = torch.exp(log_std)
+            else:
+                raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
+        else:
+            # Compute mean
+            mean = self.auxillary_actor(obs)
+            # Compute standard deviation
+            if self.noise_std_type == "scalar":
+                std = self.auxillary_std.expand_as(mean)
+            elif self.noise_std_type == "log":
+                std = torch.exp(self.auxillary_log_std).expand_as(mean)
+            else:
+                raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
+        # Create distribution
+        self.auxillary_distribution = Normal(mean, std)
 
     def act(self, obs: TensorDict, masks: torch.Tensor | None = None, hidden_state: HiddenState = None) -> torch.Tensor:
         obs = self.get_actor_obs(obs)
@@ -168,6 +209,13 @@ class ActorCriticRecurrent(nn.Module):
         out_mem = self.memory_a(obs, masks, hidden_state).squeeze(0)
         self._update_distribution(out_mem)
         return self.distribution.sample()
+
+    def auxillary_act(self, obs: TensorDict, masks: torch.Tensor | None = None, hidden_state: HiddenState = None) -> torch.Tensor:
+        obs = self.get_actor_obs(obs)
+        obs = self.actor_obs_normalizer(obs)
+        out_mem = self.memory_a(obs, masks, hidden_state).squeeze(0)
+        self._update_auxillary_distribution(out_mem)
+        return self.auxillary_distribution.sample()
 
     def act_inference(self, obs: TensorDict) -> torch.Tensor:
         obs = self.get_actor_obs(obs)
@@ -196,6 +244,9 @@ class ActorCriticRecurrent(nn.Module):
 
     def get_actions_log_prob(self, actions: torch.Tensor) -> torch.Tensor:
         return self.distribution.log_prob(actions).sum(dim=-1)
+    
+    def get_auxillary_actions_log_prob(self, actions: torch.Tensor) -> torch.Tensor:
+        return self.auxillary_distribution.log_prob(actions).sum(dim=-1)
 
     def get_hidden_states(self) -> tuple[HiddenState, HiddenState]:
         return self.memory_a.hidden_state, self.memory_c.hidden_state
