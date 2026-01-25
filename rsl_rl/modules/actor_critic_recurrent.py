@@ -10,10 +10,36 @@ import torch.nn as nn
 import warnings
 from tensordict import TensorDict
 from torch.distributions import Normal
+import torchvision
 from typing import Any, NoReturn
 
 from rsl_rl.networks import MLP, EmpiricalNormalization, HiddenState, Memory
 
+class ResNetEncoder(nn.Module):
+    """Pretrained ResNet encoder for RGB observations."""
+    
+    def __init__(self):
+        super().__init__()
+        # Load pretrained ResNet
+        self.backbone = torchvision.models.resnet18(weights=torchvision.models.ResNet18_Weights.IMAGENET1K_V1)
+        self.backbone.fc = nn.Identity()
+        self.imagenet_transform = torchvision.transforms.Compose([
+            torchvision.transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225]
+            )
+        ])
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[-1] == 3 or x.shape[-1] == 1:
+            x = x.permute(0, 3, 1, 2)
+        
+        if x.max() > 1.0:
+            x = x / 255.0
+        
+        x = self.imagenet_transform(x)
+        features = self.backbone(x)
+        return features
 
 class ActorCriticRecurrent(nn.Module):
     is_recurrent: bool = True
@@ -53,15 +79,24 @@ class ActorCriticRecurrent(nn.Module):
         # Get the observation dimensions
         self.obs_groups = obs_groups
         num_actor_obs = 0
+        create_obs_encoder = False
         for obs_group in obs_groups["policy"]:
-            assert len(obs[obs_group].shape) == 2, "The ActorCriticRecurrent module only supports 1D observations."
-            num_actor_obs += obs[obs_group].shape[-1]
+            # assert len(obs[obs_group].shape) == 2, "The ActorCriticRecurrent module only supports 1D observations."
+            if len(obs[obs_group].shape) == 4:
+                create_obs_encoder = True
+                obs_dim = 512
+            else:
+                obs_dim = obs[obs_group].shape[-1]
+            num_actor_obs += obs_dim
         num_critic_obs = 0
         for obs_group in obs_groups["critic"]:
             assert len(obs[obs_group].shape) == 2, "The ActorCriticRecurrent module only supports 1D observations."
             num_critic_obs += obs[obs_group].shape[-1]
 
         self.state_dependent_std = state_dependent_std
+        if create_obs_encoder:
+            self.obs_encoder = ResNetEncoder()
+            print(f"Created ResNet encoder for actor observations. New actor obs dim: {num_actor_obs}")
 
         # Actor
         self.memory_a = Memory(num_actor_obs, rnn_hidden_dim, rnn_num_layers, rnn_type)
@@ -235,6 +270,10 @@ class ActorCriticRecurrent(nn.Module):
         return self.critic(out_mem)
 
     def get_actor_obs(self, obs: TensorDict) -> torch.Tensor:
+        for obs_group in self.obs_groups["policy"]:
+            if len(obs[obs_group].shape) == 4:
+                encoded_obs = self.obs_encoder(obs[obs_group])
+                obs[obs_group] = encoded_obs
         obs_list = [obs[obs_group] for obs_group in self.obs_groups["policy"]]
         return torch.cat(obs_list, dim=-1)
 
