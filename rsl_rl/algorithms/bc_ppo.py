@@ -80,7 +80,7 @@ class BCPPO(PPO):
         self.learn_std = self.bc["learn_std"]
         
         # self.advisor_alpha = 4.0
-        self.advisor_loss = behavior_cloning_cfg["advisor_loss"]
+        self.advisor_loss = False #behavior_cloning_cfg["advisor_loss"]
 
     def init_storage(
         self,
@@ -107,7 +107,8 @@ class BCPPO(PPO):
         
         # Compute the actions and values
         # Compute the actions and values
-        self.transition.actions = self.policy.act(obs).detach()
+        policy_obs = obs.pop("policy")
+        self.transition.actions = self.policy.act(policy_obs).detach()
         self.transition.values = self.policy.evaluate(obs).detach()
         self.transition.actions_log_prob = self.policy.get_actions_log_prob(self.transition.actions).detach()
         self.transition.action_mean = self.policy.action_mean.detach()
@@ -115,6 +116,7 @@ class BCPPO(PPO):
         
         # Record observations before env.step()
         self.transition.observations = obs
+        self.transition.policy_observations = policy_obs
         
         # expert_obs = self.expert_obs_fn(self.bc['_env'])
         expert_obs = obs['expert']
@@ -153,6 +155,7 @@ class BCPPO(PPO):
         # Iterate over batches
         for (
             obs_batch,
+            policy_obs_batch,
             actions_batch,
             target_values_batch,
             advantages_batch,
@@ -170,7 +173,7 @@ class BCPPO(PPO):
 
             # Recompute actions log prob and entropy for current batch of transitions
             # Note: We need to do this because we updated the policy with the new parameters
-            self.policy.act(obs_batch, masks=masks_batch, hidden_state=hidden_states_batch[0])
+            self.policy.act(policy_obs_batch, masks=masks_batch, hidden_state=hidden_states_batch[0])
             actions_log_prob_batch = self.policy.get_actions_log_prob(actions_batch)
             value_batch = self.policy.evaluate(obs_batch, masks=masks_batch, hidden_state=hidden_states_batch[1])
             # Note: We only keep the entropy of the first augmentation (the original one)
@@ -223,7 +226,7 @@ class BCPPO(PPO):
                 pg_loss = surrogate_loss - self.entropy_coef * entropy_batch
                 
                 # CE loss
-                self.policy.auxillary_act(obs_batch, masks=masks_batch, hidden_state=hidden_states_batch[0])
+                self.policy.auxillary_act(policy_obs_batch, masks=masks_batch, hidden_state=hidden_states_batch[0])
                 aux_actions_log_prob_batch = self.policy.get_auxillary_actions_log_prob(expert_action_mu_batch)                
                 # get kl-div between: (expert_action_mu_batch, expert_action_sigma_batch)
                 aux_mu_batch = self.policy.auxillary_action_mean

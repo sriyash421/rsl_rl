@@ -17,6 +17,7 @@ class RolloutStorage:
     class Transition:
         def __init__(self) -> None:
             self.observations: TensorDict | None = None
+            self.policy_observations: TensorDict | None = None
             self.actions: torch.Tensor | None = None
             self.privileged_actions: torch.Tensor | None = None
             self.rewards: torch.Tensor | None = None
@@ -48,6 +49,12 @@ class RolloutStorage:
         self.actions_shape = actions_shape
 
         # Core
+        policy_obs = obs.pop("policy")
+        self.policy_observations = TensorDict(
+            {key: torch.zeros(num_transitions_per_env, *value.shape, device=device) for key, value in policy_obs.items()},
+            batch_size=[num_transitions_per_env, num_envs],
+            device=self.device,
+        )
         self.observations = TensorDict(
             {key: torch.zeros(num_transitions_per_env, *value.shape, device=device) for key, value in obs.items()},
             batch_size=[num_transitions_per_env, num_envs],
@@ -93,6 +100,7 @@ class RolloutStorage:
             raise OverflowError("Rollout buffer overflow! You should call clear() before adding new transitions.")
 
         # Core
+        self.policy_observations[self.step].copy_(transition.policy_observations)
         self.observations[self.step].copy_(transition.observations)
         self.actions[self.step].copy_(transition.actions)
         self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
@@ -189,6 +197,7 @@ class RolloutStorage:
 
         # Core
         observations = self.observations.flatten(0, 1)
+        policy_observations = self.policy_observations.flatten(0, 1)
         actions = self.actions.flatten(0, 1)
         values = self.values.flatten(0, 1)
         returns = self.returns.flatten(0, 1)
@@ -212,6 +221,7 @@ class RolloutStorage:
 
                 # Create the mini-batch
                 obs_batch = observations[batch_idx]
+                policy_obs_batch = policy_observations[batch_idx]
                 actions_batch = actions[batch_idx]
                 target_values_batch = values[batch_idx]
                 returns_batch = returns[batch_idx]
@@ -231,6 +241,7 @@ class RolloutStorage:
                 # Yield the mini-batch
                 yield (
                     obs_batch,
+                    policy_obs_batch,
                     actions_batch,
                     target_values_batch,
                     advantages_batch,
@@ -250,6 +261,7 @@ class RolloutStorage:
         if self.training_type != "rl" and self.training_type != "bc_rl":
             raise ValueError("This function is only available for reinforcement learning training.")
         padded_obs_trajectories, trajectory_masks = split_and_pad_trajectories(self.observations, self.dones)
+        padded_policy_obs_trajectories, trajectory_masks = split_and_pad_trajectories(self.policy_observations, self.dones)
 
         mini_batch_size = self.num_envs // num_mini_batches
         for ep in range(num_epochs):
@@ -267,6 +279,7 @@ class RolloutStorage:
 
                 masks_batch = trajectory_masks[:, first_traj:last_traj]
                 obs_batch = padded_obs_trajectories[:, first_traj:last_traj]
+                policy_obs_batch = padded_policy_obs_trajectories[:, first_traj:last_traj]
                 actions_batch = self.actions[:, start:stop]
                 old_mu_batch = self.mu[:, start:stop]
                 old_sigma_batch = self.sigma[:, start:stop]
@@ -307,6 +320,7 @@ class RolloutStorage:
                 # Yield the mini-batch
                 yield (
                     obs_batch,
+                    policy_obs_batch,
                     actions_batch,
                     values_batch,
                     advantages_batch,
