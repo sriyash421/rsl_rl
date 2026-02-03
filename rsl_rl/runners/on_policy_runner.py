@@ -73,6 +73,9 @@ class OnPolicyRunner:
         obs = self.env.get_observations().to(self.device)
         self.train_mode()  # switch to train mode (for dropout for example)
 
+
+        self.alg.set_bc_decay(num_learning_iterations)
+
         # Book keeping
         ep_infos = []
         rewbuffer = deque(maxlen=100)

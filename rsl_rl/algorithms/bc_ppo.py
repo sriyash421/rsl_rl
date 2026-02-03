@@ -76,11 +76,23 @@ class BCPPO(PPO):
         self.expert.eval()
 
         self.bc_loss_coeff = self.bc["cloning_loss_coeff"]
-        self.bc_decay = self.bc["loss_decay"]
+        # self.bc_decay = 0.99999 #self.bc["loss_decay"]
+        self.bc_decay = None
         self.learn_std = self.bc["learn_std"]
+        self.min_bc_coeff = 0.2
         
         # self.advisor_alpha = 4.0
         self.advisor_loss = False #behavior_cloning_cfg["advisor_loss"]
+    
+    def set_bc_decay(self, num_learning_iterations: int) -> None:
+        """Set the bc decay based on the number of learning iterations.
+            mini batch size and num learning epochs.
+        Args:
+            num_learning_iterations (int): Number of learning iterations.
+        """
+        total_updates = num_learning_iterations * self.num_learning_epochs * self.num_mini_batches
+        self.bc_decay = (self.min_bc_coeff / self.bc_loss_coeff) ** (1 / total_updates)
+        
 
     def init_storage(
         self,
@@ -266,6 +278,7 @@ class BCPPO(PPO):
                     std_loss = mse_loss(sigma_batch, expert_action_sigma_batch)
                     bc_loss += std_loss
                 self.bc_loss_coeff *= self.bc_decay
+                self.bc_loss_coeff = max(self.bc_loss_coeff, self.min_bc_coeff)
                 loss = (1 - self.bc_loss_coeff) * pg_loss + self.bc_loss_coeff * bc_loss
                 bc_loss_stat = bc_loss.item()
             
