@@ -170,8 +170,9 @@ class ActorCritic(nn.Module):
         self.obs_groups = obs_groups
         num_actor_obs = 0
         for obs_group in obs_groups["policy"]:
-            assert len(obs[obs_group].shape) == 2, "The ActorCritic module only supports 1D observations."
-            num_actor_obs += obs[obs_group].shape[-1]
+            # assert len(obs[obs_group].shape) == 2, "The ActorCritic module only supports 1D observations."
+            for key in obs[obs_group].keys():
+                num_actor_obs += obs[obs_group][key].shape[-1]
         num_critic_obs = 0
         for obs_group in obs_groups["critic"]:
             assert len(obs[obs_group].shape) == 2, "The ActorCritic module only supports 1D observations."
@@ -305,8 +306,9 @@ class ActorCritic(nn.Module):
         return self.critic(obs)
 
     def get_actor_obs(self, obs: TensorDict) -> torch.Tensor:
-        obs_list = [obs[obs_group] for obs_group in self.obs_groups["policy"]]
-        return torch.cat(obs_list, dim=-1)
+        # return torch.cat(obs_list, dim=-1)
+        features = [obs[key] for key in obs.keys()]
+        return torch.cat(features, dim=-1)
 
     def get_critic_obs(self, obs: TensorDict) -> torch.Tensor:
         obs_list = [obs[obs_group] for obs_group in self.obs_groups["critic"]]
@@ -317,7 +319,7 @@ class ActorCritic(nn.Module):
 
     def update_normalization(self, obs: TensorDict) -> None:
         if self.actor_obs_normalization:
-            actor_obs = self.get_actor_obs(obs)
+            actor_obs = self.get_actor_obs(obs["policy"])
             self.actor_obs_normalizer.update(actor_obs)
         if self.critic_obs_normalization:
             critic_obs = self.get_critic_obs(obs)

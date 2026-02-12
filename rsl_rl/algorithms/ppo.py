@@ -144,13 +144,16 @@ class PPO:
         if self.policy.is_recurrent:
             self.transition.hidden_states = self.policy.get_hidden_states()
         # Compute the actions and values
-        self.transition.actions = self.policy.act(obs).detach()
+        policy_obs = obs.pop("policy")
+        self.transition.actions = self.policy.act(policy_obs).detach()
         self.transition.values = self.policy.evaluate(obs).detach()
         self.transition.actions_log_prob = self.policy.get_actions_log_prob(self.transition.actions).detach()
         self.transition.action_mean = self.policy.action_mean.detach()
         self.transition.action_sigma = self.policy.action_std.detach()
         # Record observations before env.step()
         self.transition.observations = obs
+        self.transition.policy_observations = policy_obs
+        
         return self.transition.actions
 
     def process_env_step(
@@ -209,6 +212,7 @@ class PPO:
         # Iterate over batches
         for (
             obs_batch,
+            policy_obs_batch,
             actions_batch,
             target_values_batch,
             advantages_batch,
@@ -247,7 +251,7 @@ class PPO:
 
             # Recompute actions log prob and entropy for current batch of transitions
             # Note: We need to do this because we updated the policy with the new parameters
-            self.policy.act(obs_batch, masks=masks_batch, hidden_state=hidden_states_batch[0])
+            self.policy.act(policy_obs_batch, masks=masks_batch, hidden_state=hidden_states_batch[0])
             actions_log_prob_batch = self.policy.get_actions_log_prob(actions_batch)
             value_batch = self.policy.evaluate(obs_batch, masks=masks_batch, hidden_state=hidden_states_batch[1])
             # Note: We only keep the entropy of the first augmentation (the original one)
